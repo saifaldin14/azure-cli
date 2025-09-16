@@ -217,6 +217,8 @@ def load_arguments(self, _):
                   help='Disk format type. Default is VHD.')
         c.argument('is_dynamic', action='store_true', help='Enable dynamic disk allocation. Default is False.')
         c.argument('physical_sector_size', type=int, help='Physical sector size in bytes. Default is 512.')
+        c.argument('source_appliance_name', help='Name of the source appliance.')
+        c.argument('target_appliance_name', help='Name of the target appliance.')
 
     with self.argument_context('migrate local get-job') as c:
         c.argument('resource_group_name', options_list=['--resource-group', '-g'], help='Name of the resource group containing the Azure Migrate project.', required=True)

@@ -1132,7 +1132,7 @@ def create_local_disk_mapping(cmd, disk_id, is_os_disk=True, is_dynamic=False,
 
 def create_local_server_replication(cmd, resource_group_name, project_name, server_index, 
                                    target_vm_name, target_storage_path_id, target_virtual_switch_id, 
-                                   target_resource_group_id, disk_size_gb=64, disk_format='VHD', 
+                                   target_resource_group_id, source_appliance_name, target_appliance_name, disk_size_gb=64, disk_format='VHD',
                                    is_dynamic=False, physical_sector_size=512):
     """
     Azure CLI equivalent to New-AzMigrateLocalServerReplication PowerShell cmdlet.
@@ -1185,7 +1185,9 @@ def create_local_server_replication(cmd, resource_group_name, project_name, serv
             -TargetStoragePathId "{target_storage_path_id}" `
             -TargetVirtualSwitchId "{target_virtual_switch_id}" `
             -TargetResourceGroupId "{target_resource_group_id}" `
-            -TargetVMName "{target_vm_name}"
+            -TargetVMName "{target_vm_name}" `
+            -SourceApplianceName "{source_appliance_name}" `
+            -TargetApplianceName "{target_appliance_name}"
         
         Write-Host "Local server replication created successfully"
         Write-Host "Job ID: $($ReplicationJob.JobId)"
