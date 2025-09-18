@@ -33,12 +33,21 @@ def load_arguments(self, _):
         c.argument('check_only', action='store_true',
                   help='Only check environment requirements without making changes.')
 
+    # Enhanced diagnostics arguments
+    with self.argument_context('migrate check-prerequisites') as c:
+        c.argument('enable_diagnostics', action='store_true',
+                  help='Enable detailed diagnostic information collection.')
+        c.argument('export_report', 
+                  help='Export diagnostic report to specified file path.')
+
     # Verify setup arguments  
     with self.argument_context('migrate verify-setup') as c:
         c.argument('resource_group_name', resource_group_name_type,
                   help='Name of the resource group containing the Azure Migrate project.')
         c.argument('project_name', project_name_type,
                   help='Name of the Azure Migrate project to verify.')
+        c.argument('run_preflight_checks', action='store_true',
+                  help='Run comprehensive pre-flight checks before verification.')
 
     with self.argument_context('migrate server list-discovered') as c:
         c.argument('server_id', help='Specific server ID to retrieve.')

@@ -13,6 +13,9 @@ import threading
 import queue
 import time
 import subprocess
+from ._version_compatibility import VersionCompatibilityChecker
+from ._error_handling import handle_migrate_error, DiagnosticCollector
+from ._command_abstraction import CompatibilityLayer
 
 logger = get_logger(__name__)
 
@@ -22,10 +25,39 @@ class PowerShellExecutor:
     
     def __init__(self):
         self.platform = platform.system().lower()
+        self._module_versions = {}
+        self._compatibility_layer = None
+        self._version_checker = None
+        self._diagnostic_collector = None
+        
         try:
             self.powershell_cmd = self._get_powershell_command()
+            self._initialize_compatibility_layer()
         except CLIError:
             self.powershell_cmd = None
+            
+    def _initialize_compatibility_layer(self):
+        """Initialize the compatibility layer and version management."""
+        if self.powershell_cmd:
+            try:
+                # Initialize version checker
+                self._version_checker = VersionCompatibilityChecker(self)
+                
+                # Get current module versions
+                self._module_versions = self._get_all_module_versions()
+                
+                # Initialize compatibility layer
+                self._compatibility_layer = CompatibilityLayer(self, self._module_versions)
+                
+                # Initialize diagnostic collector
+                self._diagnostic_collector = DiagnosticCollector(self)
+                
+                logger.debug("Compatibility layer initialized successfully")
+                
+            except Exception as e:
+                logger.warning(f"Failed to initialize compatibility layer: {e}")
+                # Continue without compatibility layer
+                pass
     
     def _get_powershell_command(self):
         """Get the appropriate PowerShell command for the current platform."""
@@ -269,6 +301,263 @@ class PowerShellExecutor:
         full_script = auth_prefix + "\n" + script
         
         return self.execute_script(full_script, parameters)
+    
+    def run_preflight_checks(self, check_modules=True, check_auth=True, check_versions=True):
+        """
+        Run comprehensive pre-flight checks before executing migration commands.
+        
+        Args:
+            check_modules: Whether to check if required modules are installed
+            check_auth: Whether to check Azure authentication
+            check_versions: Whether to check module version compatibility
+            
+        Returns:
+            dict: Results of pre-flight checks
+        """
+        results = {
+            'overall_status': 'passed',
+            'checks': [],
+            'errors': [],
+            'warnings': [],
+            'recommendations': []
+        }
+        
+        try:
+            # 1. Check PowerShell availability
+            if not self.powershell_cmd:
+                results['overall_status'] = 'failed'
+                results['errors'].append('PowerShell is not available')
+                results['recommendations'].append('Run: az migrate setup-env --install-powershell')
+                return results
+                
+            results['checks'].append('PowerShell availability: ✓')
+            
+            # 2. Check module installation
+            if check_modules:
+                module_check = self._check_required_modules()
+                results['checks'].extend(module_check['checks'])
+                results['errors'].extend(module_check['errors'])
+                results['warnings'].extend(module_check['warnings'])
+                results['recommendations'].extend(module_check['recommendations'])
+                
+                if module_check['errors']:
+                    results['overall_status'] = 'failed'
+                elif module_check['warnings']:
+                    if results['overall_status'] != 'failed':
+                        results['overall_status'] = 'warning'
+            
+            # 3. Check version compatibility
+            if check_versions and self._version_checker:
+                version_check = self._version_checker.check_all_modules()
+                
+                if not version_check['overall_compatible']:
+                    results['overall_status'] = 'failed'
+                    results['errors'].extend(version_check['critical_issues'])
+                    
+                results['recommendations'].extend(version_check['recommendations'])
+                
+                for module_name, module_result in version_check['modules'].items():
+                    status = "✓" if module_result['compatible'] else "✗"
+                    results['checks'].append(f"{module_name} version compatibility: {status}")
+            
+            # 4. Check Azure authentication
+            if check_auth:
+                auth_check = self.check_azure_authentication()
+                
+                if auth_check.get('IsAuthenticated', False):
+                    results['checks'].append('Azure authentication: ✓')
+                else:
+                    results['warnings'].append('Azure authentication not verified')
+                    results['recommendations'].append('Run: az migrate auth login')
+                    if results['overall_status'] == 'passed':
+                        results['overall_status'] = 'warning'
+                        
+        except Exception as e:
+            results['overall_status'] = 'failed'
+            results['errors'].append(f'Pre-flight check failed: {str(e)}')
+            
+        return results
+    
+    def _check_required_modules(self):
+        """Check if required PowerShell modules are installed."""
+        results = {
+            'checks': [],
+            'errors': [],
+            'warnings': [],
+            'recommendations': []
+        }
+        
+        required_modules = ['Az.Migrate', 'Az.Accounts', 'Az.Profile', 'Az.Resources']
+        optional_modules = ['Az.StackHCI']
+        
+        try:
+            module_check_script = f"""
+            $results = @()
+            $moduleNames = @{required_modules + optional_modules}
+            
+            foreach ($moduleName in $moduleNames) {{
+                try {{
+                    $installed = Get-InstalledModule -Name $moduleName -ErrorAction SilentlyContinue
+                    $available = Get-Module -ListAvailable $moduleName -ErrorAction SilentlyContinue
+                    
+                    $status = if ($installed) {{ 'installed' }} elseif ($available) {{ 'available' }} else {{ 'not_found' }}
+                    $version = if ($installed) {{ $installed.Version.ToString() }} elseif ($available) {{ $available[0].Version.ToString() }} else {{ $null }}
+                    
+                    $results += @{{
+                        'Module' = $moduleName
+                        'Status' = $status
+                        'Version' = $version
+                    }}
+                }} catch {{
+                    $results += @{{
+                        'Module' = $moduleName
+                        'Status' = 'error'
+                        'Error' = $_.Exception.Message
+                    }}
+                }}
+            }}
+            
+            return $results
+            """
+            
+            result = self.execute_script_and_return_json(module_check_script)
+            modules_info = result.get('result', [])
+            
+            for module_info in modules_info:
+                module_name = module_info.get('Module', 'Unknown')
+                status = module_info.get('Status', 'unknown')
+                version = module_info.get('Version', 'Unknown')
+                
+                if status == 'installed':
+                    results['checks'].append(f"{module_name} ({version}): ✓")
+                elif status == 'available':
+                    results['warnings'].append(f"{module_name} is available but not installed")
+                    results['recommendations'].append(f"Install {module_name}: Install-Module {module_name} -Force")
+                elif status == 'not_found':
+                    if module_name in required_modules:
+                        results['errors'].append(f"Required module {module_name} not found")
+                        results['recommendations'].append(f"Install {module_name}: Install-Module {module_name} -Force")
+                    else:
+                        results['warnings'].append(f"Optional module {module_name} not found")
+                elif status == 'error':
+                    error_msg = module_info.get('Error', 'Unknown error')
+                    results['warnings'].append(f"Error checking {module_name}: {error_msg}")
+                    
+        except Exception as e:
+            results['errors'].append(f"Failed to check modules: {str(e)}")
+            results['recommendations'].append("Run: az migrate powershell update-modules")
+            
+        return results
+    
+    def _get_all_module_versions(self):
+        """Get versions of all relevant PowerShell modules."""
+        versions = {}
+        
+        try:
+            version_script = """
+            $modules = @('Az.Migrate', 'Az.StackHCI', 'Az.Accounts', 'Az.Profile', 'Az.Resources')
+            $result = @{}
+            
+            foreach ($moduleName in $modules) {
+                try {
+                    $installed = Get-InstalledModule -Name $moduleName -ErrorAction SilentlyContinue
+                    if ($installed) {
+                        $result[$moduleName] = $installed.Version.ToString()
+                    } else {
+                        $available = Get-Module -ListAvailable $moduleName | Sort-Object Version -Descending | Select-Object -First 1
+                        if ($available) {
+                            $result[$moduleName] = $available.Version.ToString()
+                        }
+                    }
+                } catch {
+                    # Ignore errors for individual modules
+                }
+            }
+            
+            return $result
+            """
+            
+            result = self.execute_script_and_return_json(version_script)
+            versions = result.get('result', {})
+            
+        except Exception as e:
+            logger.debug(f"Failed to get module versions: {e}")
+            
+        return versions
+    
+    def execute_script_and_return_json(self, script_content):
+        """Execute a PowerShell script and return JSON result."""
+        wrapped_script = f"""
+        try {{
+            $result = {script_content}
+            @{{ 'result' = $result; 'success' = $true }} | ConvertTo-Json -Depth 10
+        }} catch {{
+            @{{ 'error' = $_.Exception.Message; 'success' = $false }} | ConvertTo-Json -Depth 10
+        }}
+        """
+        
+        execution_result = self.execute_script(wrapped_script)
+        
+        try:
+            import json
+            return json.loads(execution_result['stdout'])
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Failed to parse JSON result: {e}")
+            return {'success': False, 'error': 'Failed to parse result'}
+    
+    def execute_with_error_handling(self, script_content, operation_name="PowerShell operation", enable_diagnostics=False):
+        """
+        Execute a PowerShell script with enhanced error handling.
+        
+        Args:
+            script_content: PowerShell script to execute
+            operation_name: Human-readable operation name for error messages
+            enable_diagnostics: Whether to collect diagnostic information
+            
+        Returns:
+            Execution result or raises CLIError with helpful suggestions
+        """
+        try:
+            # Run pre-flight checks if compatibility layer is available
+            if self._compatibility_layer:
+                preflight_result = self.run_preflight_checks(check_auth=False)  # Skip auth check for now
+                
+                if preflight_result['overall_status'] == 'failed':
+                    error_msg = f"Pre-flight checks failed for {operation_name}"
+                    context = {'preflight_errors': preflight_result['errors']}
+                    handle_migrate_error(error_msg, context=context, enable_diagnostics=enable_diagnostics)
+                    
+                elif preflight_result['overall_status'] == 'warning':
+                    for warning in preflight_result['warnings']:
+                        logger.warning(f"Pre-flight warning: {warning}")
+            
+            # Execute the script
+            return self.execute_script_interactive(script_content)
+            
+        except Exception as e:
+            # Enhanced error handling
+            context = {
+                'operation': operation_name,
+                'platform': self.platform,
+                'powershell_cmd': self.powershell_cmd
+            }
+            
+            if enable_diagnostics and self._diagnostic_collector:
+                context['diagnostics'] = self._diagnostic_collector.collect_environment_info()
+                
+            handle_migrate_error(str(e), exception=e, context=context, enable_diagnostics=enable_diagnostics)
+    
+    def get_compatibility_layer(self):
+        """Get the compatibility layer instance."""
+        return self._compatibility_layer
+    
+    def get_version_checker(self):
+        """Get the version compatibility checker."""
+        return self._version_checker
+    
+    def get_diagnostic_collector(self):
+        """Get the diagnostic collector."""
+        return self._diagnostic_collector
     
 def get_powershell_executor():
     """Get a PowerShell executor instance."""

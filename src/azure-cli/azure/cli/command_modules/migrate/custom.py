@@ -16,160 +16,316 @@ logger = get_logger(__name__)
 # --------------------------------------------------------------------------------------------
 
 def check_migration_prerequisites(cmd):
-    """Check if the system meets migration prerequisites."""
+    """
+    Check Azure Migrate prerequisites and environment readiness.
+    
+    This command provides a comprehensive check of all prerequisites
+    including PowerShell, modules, authentication, and connectivity.
+    """
     import platform
     
-    prereqs = {
+    logger.info("Checking Azure Migrate prerequisites...")
+    
+    ps_executor = get_powershell_executor()
+    
+    # Collect comprehensive diagnostic information
+    if ps_executor:
+        diagnostic_collector = ps_executor.get_diagnostic_collector()
+        if diagnostic_collector:
+            env_info = diagnostic_collector.collect_environment_info()
+            
+            logger.info("Environment Diagnostic Report:")
+            logger.info("=" * 50)
+            
+            # PowerShell info
+            ps_info = env_info.get('powershell_info', {})
+            logger.info(f"PowerShell Status: {ps_info.get('status', 'Unknown')}")
+            if ps_info.get('Version'):
+                logger.info(f"PowerShell Version: {ps_info['Version']}")
+                logger.info(f"PowerShell Edition: {ps_info.get('Edition', 'Unknown')}")
+                logger.info(f"Execution Policy: {ps_info.get('ExecutionPolicy', 'Unknown')}")
+            
+            # Module info
+            module_info = env_info.get('module_info', {})
+            logger.info("")
+            logger.info("PowerShell Module Status:")
+            for module_name, module_data in module_info.items():
+                status = module_data.get('Status', 'unknown')
+                if status == 'installed':
+                    logger.info(f"✓ {module_name} - Installed ({module_data.get('Installed', 'Unknown version')})")
+                elif status == 'available':
+                    logger.info(f"⚠ {module_name} - Available but not installed ({module_data.get('Available', 'Unknown version')})")
+                elif status == 'not_found':
+                    logger.error(f"✗ {module_name} - Not found")
+                else:
+                    logger.warning(f"? {module_name} - Status: {status}")
+            
+            # Azure context
+            azure_context = env_info.get('azure_context', {})
+            logger.info("")
+            logger.info("Azure Authentication Status:")
+            if azure_context.get('Authenticated'):
+                logger.info(f"✓ Authenticated as: {azure_context.get('Account', 'Unknown')}")
+                logger.info(f"  Subscription: {azure_context.get('Subscription', 'Unknown')} ({azure_context.get('SubscriptionId', 'Unknown')})")
+                logger.info(f"  Tenant: {azure_context.get('Tenant', 'Unknown')}")
+            else:
+                logger.warning("⚠ Not authenticated to Azure")
+                logger.info("  Run: az migrate auth login")
+            
+            # System info
+            system_info = env_info.get('system_info', {})
+            logger.info("")
+            logger.info("System Information:")
+            logger.info(f"Platform: {system_info.get('platform', 'Unknown')}")
+            logger.info(f"Python Version: {system_info.get('python_version', 'Unknown')}")
+            
+            # Version compatibility check
+            version_checker = ps_executor.get_version_checker()
+            if version_checker:
+                logger.info("")
+                logger.info("Version Compatibility Report:")
+                compatibility_report = version_checker.get_compatibility_report()
+                logger.info(compatibility_report)
+            
+        # Run pre-flight checks
+        logger.info("")
+        logger.info("Pre-flight Checks:")
+        logger.info("-" * 20)
+        
+        preflight_result = ps_executor.run_preflight_checks()
+        
+        for check in preflight_result['checks']:
+            logger.info(check)
+        
+        if preflight_result['warnings']:
+            logger.info("")
+            logger.warning("Warnings found:")
+            for warning in preflight_result['warnings']:
+                logger.warning(f"⚠ {warning}")
+        
+        if preflight_result['errors']:
+            logger.info("")
+            logger.error("Errors found:")
+            for error in preflight_result['errors']:
+                logger.error(f"✗ {error}")
+        
+        if preflight_result['recommendations']:
+            logger.info("")
+            logger.info("Recommendations:")
+            for rec in preflight_result['recommendations']:
+                logger.info(f"💡 {rec}")
+        
+        # Final assessment
+        logger.info("")
+        logger.info("Overall Assessment:")
+        logger.info("=" * 20)
+        
+        if preflight_result['overall_status'] == 'passed':
+            logger.info("✅ All checks passed! Azure Migrate CLI is ready to use.")
+        elif preflight_result['overall_status'] == 'warning':
+            logger.warning("⚠ Some warnings found. Azure Migrate CLI should work but may have limitations.")
+        else:
+            logger.error("❌ Critical issues found. Please resolve the errors before using Azure Migrate CLI.")
+            logger.error("Run 'az migrate setup-env' to automatically resolve common issues.")
+    
+    else:
+        logger.error("❌ PowerShell executor could not be initialized.")
+        logger.error("This indicates a fundamental issue with PowerShell availability.")
+        logger.error("Run 'az migrate setup-env --install-powershell' to resolve this.")
+    
+    return {
+        'status': preflight_result.get('overall_status', 'failed') if ps_executor else 'failed',
+        'powershell_available': ps_executor is not None
+    }
+           
+def setup_migration_environment(cmd, install_powershell=False, check_only=False):
+    """
+    Set up and verify the Azure migration environment.
+    
+    This command performs comprehensive environment setup including:
+    - PowerShell availability and version checking
+    - Azure PowerShell module installation and compatibility
+    - Environment-specific configuration
+    - Pre-flight validation
+    """
+    import platform
+    
+    logger.info("Setting up Azure Migration environment...")
+    
+    setup_results = {
         'platform': platform.system(),
-        'platform_version': platform.version(),
-        'python_version': platform.python_version(),
-        'powershell_available': False,
-        'powershell_version': None,
-        'azure_powershell_available': False,
+        'powershell_status': 'unknown',
+        'modules_status': 'unknown',
+        'compatibility_status': 'unknown',
+        'checks': [],
+        'errors': [],
+        'warnings': [],
+        'actions_taken': [],
         'recommendations': []
     }
     
-    try:
-        ps_executor = get_powershell_executor()
-        if ps_executor:
-            is_available, _ = ps_executor.check_powershell_availability()
-            if is_available:
-                prereqs['powershell_available'] = True
-                try:
-                    # Check PowerShell version
-                    result = ps_executor.execute_script('$PSVersionTable.PSVersion.ToString()')
-                    prereqs['powershell_version'] = result.get('stdout', '').strip()
-                    
-                    # Check Azure PowerShell modules
-                    module_result = ps_executor.execute_script('Get-Module -ListAvailable Az.* | Select-Object -First 1')
-                    if module_result.get('stdout'):
-                        prereqs['azure_powershell_available'] = True
-                    
-                except Exception:
-                    prereqs['recommendations'].append('Azure PowerShell modules may not be installed')
-            else:
-                prereqs['recommendations'].append('PowerShell is not available')
-        else:
-            prereqs['recommendations'].append('PowerShell executor could not be initialized')
-            
-    except Exception as e:
-        prereqs['powershell_error'] = str(e)
-        prereqs['recommendations'].append('PowerShell is not available or not configured properly')
-    
-    # Platform-specific recommendations
-    if not prereqs['powershell_available']:
-        if prereqs['platform'] == 'Windows':
-            prereqs['recommendations'].append('Install PowerShell Core from https://github.com/PowerShell/PowerShell')
-        elif prereqs['platform'] == 'Linux':
-            prereqs['recommendations'].append('Install PowerShell Core: sudo apt install powershell (Ubuntu) or sudo yum install powershell (RHEL)')
-        elif prereqs['platform'] == 'Darwin':
-            prereqs['recommendations'].append('Install PowerShell Core: brew install powershell')
-    
-    if not prereqs['azure_powershell_available'] and prereqs['powershell_available']:
-        prereqs['recommendations'].append('Install Azure PowerShell: Install-Module -Name Az -Force')
-    
-    # Display results
-    logger.info(f"Platform: {prereqs['platform']} {prereqs.get('platform_version', 'Unknown')}")
-    logger.info(f"Python Version: {prereqs['python_version']}")
-    logger.info(f"PowerShell Available: {prereqs['powershell_available']}")
-    if prereqs['powershell_version']:
-        logger.info(f"PowerShell Version: {prereqs['powershell_version']}")
-    logger.info(f"Azure PowerShell Available: {prereqs['azure_powershell_available']}")
-    
-    if prereqs['recommendations']:
-        logger.warning("Recommendations:")
-        for rec in prereqs['recommendations']:
-            logger.warning(f"  - {rec}")
-    
-    return prereqs
-           
-def setup_migration_environment(cmd, install_powershell=False, check_only=False):
-    """Configure the system environment for migration operations."""    
-    logger = get_logger(__name__)
     system = platform.system().lower()
     
-    setup_results = {
-        'platform': system,
-        'checks': [],
-        'actions_taken': [],
-        'cross_platform_ready': False,
-        'powershell_status': 'not_checked'
-    }
-    
-    logger.info(f"Setting up migration environment for {system}")
-    
-    # 1. Check PowerShell availability
+    # 1. PowerShell availability check and setup
+    logger.info("1. Checking PowerShell availability...")
     try:
         ps_executor = get_powershell_executor()
-        is_available, ps_cmd = ps_executor.check_powershell_availability()
         
-        if is_available:
+        if ps_executor and ps_executor.powershell_cmd:
             setup_results['powershell_status'] = 'available'
-            setup_results['powershell_command'] = ps_cmd
-            setup_results['checks'].append('PowerShell is available')
+            setup_results['checks'].append('✓ PowerShell is available')
             
-            # Check PowerShell version compatibility
+            # Get PowerShell version
             try:
-                version_result = ps_executor.execute_script('$PSVersionTable.PSVersion.Major')
-                major_version = int(version_result.get('stdout', '0').strip())
-                
-                if major_version >= 7:  # PowerShell Core 7+
-                    setup_results['checks'].append('PowerShell Core 7+ detected (cross-platform compatible)')
-                    setup_results['cross_platform_ready'] = True
-                elif major_version >= 5 and system == 'windows':
-                    setup_results['checks'].append('Windows PowerShell 5+ detected (Windows only)')
-                    setup_results['cross_platform_ready'] = False
-                else:
-                    setup_results['checks'].append('PowerShell version too old')
-                    setup_results['cross_platform_ready'] = False
-                    
-            except Exception as e:
-                setup_results['checks'].append(f'Could not determine PowerShell version: {e}')
+                result = ps_executor.execute_script('$PSVersionTable.PSVersion.ToString()')
+                ps_version = result.get('stdout', '').strip()
+                setup_results['checks'].append(f'✓ PowerShell version: {ps_version}')
+            except Exception:
+                setup_results['warnings'].append('Could not determine PowerShell version')
                 
         else:
             setup_results['powershell_status'] = 'not_available'
-            setup_results['checks'].append('PowerShell is not available')
+            setup_results['errors'].append('PowerShell is not available')
             
             if install_powershell and not check_only:
-                # Attempt automatic installation
+                logger.info("Attempting to install PowerShell...")
                 install_result = _attempt_powershell_installation(system)
-                setup_results['actions_taken'].append(install_result)
+                setup_results['actions_taken'].append(f'PowerShell installation: {install_result}')
+                
+                # Re-check after installation
+                try:
+                    ps_executor = get_powershell_executor()
+                    if ps_executor and ps_executor.powershell_cmd:
+                        setup_results['powershell_status'] = 'available'
+                        setup_results['checks'].append('✓ PowerShell installed successfully')
+                    else:
+                        setup_results['errors'].append('PowerShell installation may have failed')
+                except Exception:
+                    setup_results['errors'].append('PowerShell installation verification failed')
             else:
-                setup_results['checks'].append(_get_powershell_install_instructions(system))
+                setup_results['recommendations'].append(_get_powershell_install_instructions(system))
                 
     except Exception as e:
         setup_results['powershell_status'] = 'error'
-        setup_results['checks'].append(f'PowerShell check failed: {str(e)}')
+        setup_results['errors'].append(f'PowerShell check failed: {str(e)}')
     
     # 2. Check Azure PowerShell modules
     if setup_results['powershell_status'] == 'available':
+        logger.info("2. Checking Azure PowerShell modules...")
         try:
-            ps_executor = get_powershell_executor()
-            az_check = ps_executor.execute_script('Get-Module -ListAvailable Az.Migrate | Select-Object -First 1')
+            # Use enhanced module checking from the new system
+            module_check = ps_executor._check_required_modules()
             
-            if az_check.get('stdout', '').strip():
-                setup_results['checks'].append('Az.Migrate module is available')
-            else:
-                setup_results['checks'].append('Az.Migrate module is not installed')
+            setup_results['checks'].extend(module_check['checks'])
+            setup_results['errors'].extend(module_check['errors'])
+            setup_results['warnings'].extend(module_check['warnings'])
+            setup_results['recommendations'].extend(module_check['recommendations'])
+            
+            if module_check['errors']:
+                setup_results['modules_status'] = 'missing'
                 if not check_only:
-                    setup_results['checks'].append('Install with: Install-Module -Name Az.Migrate -Force')
-                    
+                    logger.info("Installing missing Azure PowerShell modules...")
+                    try:
+                        install_script = """
+                        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+                        $modules = @('Az.Migrate', 'Az.Accounts', 'Az.Profile', 'Az.Resources')
+                        foreach ($module in $modules) {
+                            try {
+                                Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser
+                                Write-Host "Installed $module successfully"
+                            } catch {
+                                Write-Warning "Failed to install $module`: $($_.Exception.Message)"
+                            }
+                        }
+                        """
+                        ps_executor.execute_script_interactive(install_script)
+                        setup_results['actions_taken'].append('Installed Azure PowerShell modules')
+                        setup_results['modules_status'] = 'installed'
+                    except Exception as e:
+                        setup_results['errors'].append(f'Module installation failed: {str(e)}')
+                        setup_results['modules_status'] = 'install_failed'
+            else:
+                setup_results['modules_status'] = 'available'
+                
         except Exception as e:
-            setup_results['checks'].append(f'Could not check Azure modules: {str(e)}')
+            setup_results['modules_status'] = 'error'
+            setup_results['errors'].append(f'Module check failed: {str(e)}')
     
-    # 3. Platform-specific environment checks
+    # 3. Version compatibility check
+    if setup_results['powershell_status'] == 'available':
+        logger.info("3. Checking version compatibility...")
+        try:
+            version_checker = ps_executor.get_version_checker()
+            if version_checker:
+                compatibility_result = version_checker.check_all_modules()
+                
+                if compatibility_result['overall_compatible']:
+                    setup_results['compatibility_status'] = 'compatible'
+                    setup_results['checks'].append('✓ All modules are version compatible')
+                else:
+                    setup_results['compatibility_status'] = 'issues_found'
+                    setup_results['warnings'].extend(compatibility_result['critical_issues'])
+                    setup_results['recommendations'].extend(compatibility_result['recommendations'])
+                    
+                    # Show detailed compatibility report
+                    logger.info("Version Compatibility Report:")
+                    for module_name, module_result in compatibility_result['modules'].items():
+                        status = "✓" if module_result['compatible'] else "⚠"
+                        logger.info(f"{status} {module_name}: {module_result['installed_version']} (recommended: {module_result['recommended_version']})")
+                        
+            else:
+                setup_results['warnings'].append('Version compatibility checker not available')
+                
+        except Exception as e:
+            setup_results['warnings'].append(f'Version compatibility check failed: {str(e)}')
+    
+    # 4. Platform-specific environment checks
     platform_checks = _perform_platform_specific_checks(system)
     setup_results['checks'].extend(platform_checks)
     
-    # Display results
+    # 5. Generate comprehensive summary
+    logger.info("")
     logger.info("Environment Setup Results:")
+    logger.info("=" * 40)
+    
     for check in setup_results['checks']:
-        logger.info(f"  {check}")
+        logger.info(check)
+    
+    if setup_results['warnings']:
+        logger.info("")
+        logger.info("Warnings:")
+        for warning in setup_results['warnings']:
+            logger.warning(f"⚠ {warning}")
+    
+    if setup_results['errors']:
+        logger.info("")
+        logger.info("Errors:")
+        for error in setup_results['errors']:
+            logger.error(f"✗ {error}")
     
     if setup_results['actions_taken']:
-        logger.info("Actions taken:")
+        logger.info("")
+        logger.info("Actions Taken:")
         for action in setup_results['actions_taken']:
-            logger.info(f"  {action}")
+            logger.info(f"• {action}")
+    
+    if setup_results['recommendations']:
+        logger.info("")
+        logger.info("Recommendations:")
+        for rec in setup_results['recommendations']:
+            logger.info(f"💡 {rec}")
+    
+    # Final status determination
+    if setup_results['errors']:
+        logger.error("")
+        logger.error("❌ Environment setup completed with errors. Some features may not work correctly.")
+        logger.error("Please address the errors above before running migration commands.")
+    elif setup_results['warnings']:
+        logger.warning("")
+        logger.warning("⚠ Environment setup completed with warnings. Review the warnings above.")
+    else:
+        logger.info("")
+        logger.info("✅ Environment setup completed successfully! Azure Migrate CLI is ready to use.")
     
     return setup_results
 
@@ -873,9 +1029,58 @@ try {
 def create_server_replication(cmd, resource_group_name, project_name, target_vm_name, 
                              target_resource_group, target_network, server_name=None, 
                              server_index=None):
-    """Create replication for a discovered server."""
+    """Create replication for a discovered server with enhanced error handling."""
     
-    ps_executor = get_powershell_executor()    
+    ps_executor = get_powershell_executor()
+    
+    # Enhanced pre-flight checks
+    try:
+        preflight_result = ps_executor.run_preflight_checks(check_modules=True, check_auth=True, check_versions=True)
+        
+        if preflight_result['overall_status'] == 'failed':
+            error_details = "\n".join([f"• {error}" for error in preflight_result['errors']])
+            recommendations = "\n".join([f"• {rec}" for rec in preflight_result['recommendations']])
+            
+            raise CLIError(f"""
+Pre-flight checks failed for server replication:
+
+Issues Found:
+{error_details}
+
+Recommended Actions:
+{recommendations}
+
+Run 'az migrate setup-env' to resolve environment issues.
+""")
+        
+        elif preflight_result['overall_status'] == 'warning':
+            for warning in preflight_result['warnings']:
+                logger.warning(f"Pre-flight warning: {warning}")
+                
+    except Exception as e:
+        if "Pre-flight checks failed" in str(e):
+            raise  # Re-raise our custom error
+        else:
+            logger.warning(f"Pre-flight checks could not be completed: {e}")
+    
+    # Try using the compatibility layer first
+    compatibility_layer = ps_executor.get_compatibility_layer()
+    if compatibility_layer:
+        try:
+            return compatibility_layer.execute_command(
+                'create_server_replication',
+                project_name=project_name,
+                resource_group_name=resource_group_name,
+                target_vm_name=target_vm_name,
+                target_resource_group=target_resource_group,
+                target_network=target_network,
+                server_name=server_name,
+                server_index=server_index
+            )
+        except Exception as e:
+            logger.warning(f"Compatibility layer execution failed, falling back to direct PowerShell: {e}")
+    
+    # Fallback to direct PowerShell execution  
     replication_script = f"""
     # Create server replication
     try {{        
@@ -981,9 +1186,14 @@ def create_server_replication(cmd, resource_group_name, project_name, target_vm_
     """
     
     try:
-        ps_executor.execute_script_interactive(replication_script)       
+        return ps_executor.execute_with_error_handling(
+            replication_script, 
+            operation_name="create server replication",
+            enable_diagnostics=True
+        )
     except Exception as e:
-        raise CLIError(f'Failed to create server replication: {str(e)}')
+        # This will be handled by the enhanced error handling in execute_with_error_handling
+        raise
     
 def get_replication_job_status(cmd, resource_group_name, project_name, vm_name=None, 
                               job_id=None, subscription_id=None):
@@ -1140,6 +1350,60 @@ def create_local_server_replication(cmd, resource_group_name, project_name, serv
     """
     ps_executor = get_powershell_executor()
     
+    # Enhanced pre-flight checks
+    try:
+        preflight_result = ps_executor.run_preflight_checks(check_modules=True, check_auth=True, check_versions=True)
+        
+        if preflight_result['overall_status'] == 'failed':
+            error_details = "\n".join([f"• {error}" for error in preflight_result['errors']])
+            recommendations = "\n".join([f"• {rec}" for rec in preflight_result['recommendations']])
+            
+            raise CLIError(f"""
+Pre-flight checks failed for local server replication:
+
+Issues Found:
+{error_details}
+
+Recommended Actions:
+{recommendations}
+
+Run 'az migrate setup-env' to resolve environment issues.
+""")
+        
+        elif preflight_result['overall_status'] == 'warning':
+            for warning in preflight_result['warnings']:
+                logger.warning(f"Pre-flight warning: {warning}")
+                
+    except Exception as e:
+        if "Pre-flight checks failed" in str(e):
+            raise  # Re-raise our custom error
+        else:
+            logger.warning(f"Pre-flight checks could not be completed: {e}")
+    
+    # Try using the compatibility layer first
+    compatibility_layer = ps_executor.get_compatibility_layer()
+    if compatibility_layer:
+        try:
+            return compatibility_layer.execute_command(
+                'create_local_server_replication',
+                project_name=project_name,
+                resource_group_name=resource_group_name,
+                server_index=server_index,
+                target_vm_name=target_vm_name,
+                target_storage_path_id=target_storage_path_id,
+                target_virtual_switch_id=target_virtual_switch_id,
+                target_resource_group_id=target_resource_group_id,
+                source_appliance_name=source_appliance_name,
+                target_appliance_name=target_appliance_name,
+                disk_size_gb=disk_size_gb,
+                disk_format=disk_format,
+                is_dynamic=is_dynamic,
+                physical_sector_size=physical_sector_size
+            )
+        except Exception as e:
+            logger.warning(f"Compatibility layer execution failed, falling back to direct PowerShell: {e}")
+    
+    # Fallback to direct PowerShell execution
     local_replication_script = f"""
     try {{
         $DiscoveredServers = Get-AzMigrateDiscoveredServer -ProjectName {project_name} -ResourceGroupName {resource_group_name} -SourceMachineType VMware
@@ -1200,9 +1464,14 @@ def create_local_server_replication(cmd, resource_group_name, project_name, serv
     """
     
     try:
-        ps_executor.execute_script_interactive(local_replication_script)
+        return ps_executor.execute_with_error_handling(
+            local_replication_script, 
+            operation_name="create local server replication",
+            enable_diagnostics=True
+        )
     except Exception as e:
-        raise CLIError(f'Failed to create local server replication: {str(e)}')
+        # This will be handled by the enhanced error handling in execute_with_error_handling
+        raise
 
 def get_local_replication_job(cmd, resource_group_name, project_name, job_id=None, input_object=None, subscription_id=None):
     """
