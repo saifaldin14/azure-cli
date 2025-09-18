@@ -21,9 +21,7 @@ def check_migration_prerequisites(cmd):
     
     This command provides a comprehensive check of all prerequisites
     including PowerShell, modules, authentication, and connectivity.
-    """
-    import platform
-    
+    """    
     logger.info("Checking Azure Migrate prerequisites...")
     
     ps_executor = get_powershell_executor()
