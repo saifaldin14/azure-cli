@@ -853,6 +853,7 @@ def create_managed_environment(cmd,
                                instrumentation_key=None,
                                dapr_connection_string=None,
                                infrastructure_subnet_resource_id=None,
+                               infrastructure_resource_group=None,
                                docker_bridge_cidr=None,
                                platform_reserved_cidr=None,
                                platform_reserved_dns_ip=None,
@@ -5160,7 +5161,7 @@ def show_environment_premium_ingress(cmd, name, resource_group_name):
         handle_raw_exception(e)
 
 
-def add_environment_premium_ingress(cmd, name, resource_group_name, workload_profile_name, min_replicas=None, max_replicas=None, termination_grace_period=None, request_idle_timeout=None, header_count_limit=None, no_wait=False):
+def add_environment_premium_ingress(cmd, name, resource_group_name, workload_profile_name, termination_grace_period=None, request_idle_timeout=None, header_count_limit=None, no_wait=False):
     _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
 
     try:
@@ -5190,7 +5191,7 @@ def add_environment_premium_ingress(cmd, name, resource_group_name, workload_pro
         handle_raw_exception(e)
 
 
-def update_environment_premium_ingress(cmd, name, resource_group_name, workload_profile_name=None, min_replicas=None, max_replicas=None, termination_grace_period=None, request_idle_timeout=None, header_count_limit=None, no_wait=False):
+def update_environment_premium_ingress(cmd, name, resource_group_name, workload_profile_name=None, termination_grace_period=None, request_idle_timeout=None, header_count_limit=None, no_wait=False):
     _validate_subscription_registered(cmd, CONTAINER_APPS_RP)
 
     try:
